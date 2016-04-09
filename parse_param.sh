@@ -278,7 +278,14 @@ echo "mount return value $?"
 
 
 echo "begin to backup: "
-tar cvf - $cur_dir | $rsh_remote_host sudo dd of=/mnt/backup_disk/0
+if [ $backup_method = 'dd' ]
+    then 
+        tar cvf - $cur_dir | $rsh_remote_host sudo dd of=/mnt/backup_disk/0
+    else
+        rsync -azv --progress -e "ssh -i $pem_file_path" \
+        $cur_dir \
+        ubuntu@$instance_ip:/mnt/backup_disk/
+fi
 echo " backup return value $?"
 
 $rsh_remote_host sudo ls /mnt/backup_disk/

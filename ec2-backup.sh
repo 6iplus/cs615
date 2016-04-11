@@ -8,7 +8,7 @@ eval set -- "$TEMP"
 key_name='EC2-BACKUP-key' #todo
 sg_name='EC2-BACKUP-sg'
 volume_flag=false
-volume_id="vol-000000"
+volume_id=""
 backup_method="dd"
 v_count=0
 h_count=0
@@ -19,9 +19,9 @@ usage_statement=$'-h\n	Print a usage statement and exit. \n\n-m method\n	Use the
 while true ; do
 	case "$1" in
 		-h) echo "$usage_statement" ; exit 0 ;;
-		-v)	volume_flag=true
+		-v)	
 			case "$2" in
-				vol-*) volume_id=$2; shift 2 ;;
+				vol-*) volume_id=$2;  shift 2 ;;
 				*)  echo "\`$2' is not a valid volume id" ; exit 1 ;;
 			esac ;;
 		-m)         
@@ -39,7 +39,12 @@ done
 
 echo $backup_method
 echo $volume_id
-
+if [[ -z $volume_id ]]
+then
+    volume_id=''
+else
+    volume_flag=true;
+fi
 
 
 #echo ${#arg[@]}
@@ -53,16 +58,17 @@ if [ $# == 1 ]; then
 		exit 1
 	fi
 else
-	echo "more than one remaining argument, error"	
+	echo " argument number error"	
+    exit 1
 fi
-echo $cur_dir "ccc"
+echo $cur_dir "is user sepcified DIR"
 
 ##deternmine the key to use
 ssh_env_flag=false
 ssh_flag=""
 #If key is specified in the env_var, use it, else read from ssh_config
 key_path=""
-if [ -z "$EC2_BACKUP_FLAGS_SSH" ]; then
+if [[ -z "$EC2_BACKUP_FLAGS_SSH" ]]; then
 	ssh_env_flag=false
 	key_path=$(cat ~/.ssh/config | grep IdentityFile | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -s " " | cut -d ' ' -f2)
 else
@@ -86,7 +92,7 @@ public_key=$(ssh-keygen -y -f $key_path)
 import_key_return=$(aws ec2 import-key-pair --key-name $key_name --public-key-material "$public_key")
 
 ##check validity and determine the zone of the given volume(if specified), the instance will be createdin the same zone as the volume
-volume_zone=""
+volume_zone="us-east-1c"
 if "$volume_flag"  ; then
 	volume_state=$(aws ec2 describe-volumes --volume-id $volume_id --output text --query 'Volumes[0].State')
 	if [ $? != 0 ] ; then echo "Volume does not exist"  ; exit 1 ; fi
@@ -124,12 +130,11 @@ echo $sg_id
 sg_result=$(aws ec2 authorize-security-group-ingress --group-name EC2-BACKUP-sg --protocol tcp --port 22 --cidr 0.0.0.0/0)
 
 
-echo "before"
 
 ##EC2_BACKUP_FLAGS_AWS logic
 
 aws_flag=""
-if [ -z "$EC2_BACKUP_FLAGS_AWS" ]; then
+if [[ -z "$EC2_BACKUP_FLAGS_AWS" ]]; then
         aws_flag="--instance-type t2.micro"
 else
         aws_flag=$(printenv EC2_BACKUP_FLAGS_AWS)
@@ -137,9 +142,10 @@ fi
 
 echo $key_path
 
+#instance_id='i-dcfb0741'
+#instance_ip='ec2-54-84-57-36.compute-1.amazonaws.com'
 ##create Ubuntu instance, 
 instance_id="$(aws ec2 run-instances --image-id  ami-fce3c696 --security-group-ids $sg_id --count 1 $aws_flag --key-name $key_name --placement AvailabilityZone=$volume_zone --query 'Instances[0].InstanceId' --output text)"
-echo "after"
 
 echo $instance_id
 
@@ -192,19 +198,24 @@ else
 fi
 
 
-ssh ubuntu@$instance_ip #-o #BatchMode=yes 
+#ssh ubuntu@$instance_ip #-o #BatchMode=yes 
 
 #==========================================================
 
 
-instance_ip="ec2-54-175-95-4.compute-1.amazonaws.com"
+#instance_ip="ec2-54-175-95-4.compute-1.amazonaws.com"
 #rsh_remote_host='rsh ubuntu@54.173.211.173 -i /home/rding6/devenv-key.pem' 
-rsh_remote_host="rsh ubuntu@$instance_ip"
-cur_dir='.'
-my_instance_id='i-86b14f01'
-my_volume_id='vol-6110f0b0'
-#my_instance_id=$instance_id
-#my_volume_id=$volume_id
+if [[ -z $EC2_BACKUP_FLAGS_SSH ]]
+then
+    rsh_remote_host="rsh ubuntu@$instance_ip"
+else
+    rsh_remote_host="rsh ubuntu@$instance_ip -i $key_path"
+fi
+#cur_dir
+#my_instance_id='i-86b14f01'
+#my_volume_id='vol-6110f0b0'
+my_instance_id=$instance_id
+my_volume_id=$volume_id
 device_name=''
 
 get_next_avaliable_device_name() {
@@ -222,7 +233,7 @@ get_next_avaliable_device_name() {
         fi
     done
     device_name=${device_names[$(($i+1))]} 
-    if [ -z $device_name ]
+    if [[ -z $device_name ]]
     then
         return 2
     else
@@ -239,14 +250,14 @@ get_volume_size_by_dir_size() {
         then echo 1 
         else echo $size 
     fi
-
+}
 
 get_cur_dir_size() {
     du -s $cur_dir | awk '{print $1;}'
 }
 
 create_volume(){
-    if [ -z $my_volume_id ]
+    if [[ -z $my_volume_id ]]
     then
         # Zero-length var
         echo 'no volume_id sepcified, try to create a new volume'
@@ -351,7 +362,24 @@ echo "mount return value $?"
 
 
 echo "begin to backup: "
-tar cvf - $cur_dir | $rsh_remote_host sudo dd of=/mnt/backup_disk/0
+$rsh_remote_host sudo chown -R ubuntu:ubuntu /mnt/backup_disk/
+
+if [ $backup_method = 'dd' ]
+    then 
+        tar cvf - $cur_dir | $rsh_remote_host sudo dd of=/mnt/backup_disk/0
+    else
+        if [[ -z $EC2_BACKUP_FLAGS_SSH ]]
+        then
+        rsync -azv --progress  \
+            $cur_dir \
+            ubuntu@$instance_ip:/mnt/backup_disk/
+        else
+          echo "ssh -i $key_path"
+        rsync -azv --progress -e "ssh -i $key_path" \
+            $cur_dir \
+            ubuntu@$instance_ip:/mnt/backup_disk/
+        fi
+fi
 echo " backup return value $?"
 
 $rsh_remote_host sudo ls /mnt/backup_disk/
